@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>צ'אט מודל קטן</title>
+<style>
+  :root { --bg:#f8f9fa; --panel:#f0f4f9; --card:#fff; --text:#1f1f1f; --muted:#5f6368; --accent:#1a73e8; --line:#e1e5ea; --glow:rgba(120,180,255,.45); }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#131314; --panel:#1e1f20; --card:#282a2c; --text:#e3e3e3; --muted:#9aa0a6; --accent:#8ab4f8; --line:#3c4043; --glow:rgba(60,110,200,.35); }
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--text); font-family:system-ui,"Segoe UI",Arial,sans-serif; display:flex; overflow:hidden; }
+  aside { width:260px; background:var(--panel); padding:12px; display:flex; flex-direction:column; gap:4px; overflow-y:auto; flex-shrink:0; }
+  aside button.item { all:unset; cursor:pointer; padding:9px 12px; border-radius:999px; font-size:.92rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  aside button.item:hover { background:var(--line); }
+  aside .lbl { color:var(--muted); font-size:.8rem; margin:14px 12px 4px; }
+  main { flex:1; position:relative; display:flex; flex-direction:column; align-items:center; min-width:0;
+         background:radial-gradient(ellipse 55% 40% at 50% 62%, var(--glow), transparent 70%); }
+  #hero { margin:auto 0; text-align:center; padding:0 16px; width:100%; }
+  #hero h1 { font-weight:400; font-size:2.2rem; margin:0 0 26px; }
+  #hero p { color:var(--muted); margin:18px 0 0; font-size:.9rem; }
+  #chat { flex:1; width:100%; max-width:760px; overflow-y:auto; padding:24px 16px 8px; display:none; }
+  .msg { margin:0 0 18px; display:flex; }
+  .msg.me { justify-content:flex-start; }
+  .bubble { max-width:85%; padding:10px 16px; border-radius:20px; white-space:pre-wrap; line-height:1.7; }
+  .me .bubble { background:var(--panel); }
+  .ai .bubble { background:transparent; padding-inline:0; }
+  .ai .bubble::before { content:"✦ "; color:var(--accent); }
+  .bar { width:min(720px, calc(100% - 32px)); background:var(--card); border-radius:999px; box-shadow:0 1px 6px rgba(0,0,0,.18); display:flex; align-items:center; gap:6px; padding:8px 10px; margin-bottom:0; }
+  .bar input { flex:1; border:0; outline:0; background:transparent; color:var(--text); font-size:1.05rem; padding:8px; min-width:0; }
+  .bar button { all:unset; cursor:pointer; width:38px; height:38px; border-radius:50%; display:grid; place-items:center; font-size:1.3rem; color:var(--muted); }
+  .bar button:hover { background:var(--panel); }
+  .bar button.send { color:var(--accent); }
+  #dock { width:100%; display:flex; flex-direction:column; align-items:center; padding-bottom:22px; }
+  #hero-slot { width:100%; display:flex; justify-content:center; }
+  #status { color:var(--muted); font-size:.8rem; margin-top:10px; text-align:center; min-height:1.2em; }
+  #status button { all:unset; cursor:pointer; color:var(--accent); text-decoration:underline; }
+  .chips { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin-top:18px; }
+  .chip { all:unset; cursor:pointer; border:1px solid var(--line); border-radius:999px; padding:7px 14px; font-size:.9rem; background:var(--card); }
+  .chip:hover { background:var(--panel); }
+  @media (max-width:700px) { aside { display:none; } #hero h1 { font-size:1.7rem; } }
+</style>
+</head>
+<body>
+<aside>
+  <button class="item" id="new">✎ שיחה חדשה</button>
+  <button class="item" id="info">ⓘ פרטי המודל (model.bin)</button>
+  <div class="lbl">שיחות קודמות</div>
+  <div id="history"></div>
+</aside>
+
+<main>
+  <div id="hero">
+    <h1>ממה להתחיל?</h1>
+    <div id="hero-slot"></div>
+    <div class="chips" id="chips">
+      <button class="chip" data-p="ספר לי בדיחה">ספר לי בדיחה</button>
+      <button class="chip" data-p="תן לי רעיון לסיפור">רעיון לסיפור</button>
+      <button class="chip" data-p="כתוב שיר על הים">שיר על הים</button>
+      <button class="chip" data-p="חפש ירושלים">חפש ירושלים</button>
+    </div>
+  </div>
+  <div id="chat"></div>
+
+  <div id="dock">
+    <div class="bar" id="bar">
+      <button id="plus" title="טען model.bin ידנית">＋</button>
+      <button id="globe" title="חיפוש באינטרנט (ויקיפדיה)">🌐</button>
+      <input id="in" type="text" placeholder="שאל אותי משהו…" autocomplete="off">
+      <button class="send" id="send" title="שלח">➤</button>
+    </div>
+    <div id="status">טוען את model.bin…</div>
+  </div>
+  <input type="file" id="file" accept=".bin" hidden>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let M = null;              // loaded model: {C,E,H,chars,idx,P}
+let busy = false;
+let started = false;
+let web = false;           // internet search mode
+
+// ---- model.bin loading (format written by train.py) ----
+function parseModel(buf) {
+  const n = new DataView(buf).getUint32(0, true);
+  const cfg = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
+  let off = 4 + n;
+  const P = {};
+  for (const k of ['emb', 'W1', 'b1', 'W2', 'b2']) {
+    const len = cfg.shapes[k].reduce((a, b) => a * b, 1) * 4;
+    P[k] = new Float32Array(buf.slice(off, off + len));   // slice keeps alignment
+    off += len;
+  }
+  const idx = {}; [...cfg.chars].forEach((c, i) => idx[c] = i);
+  return { ...cfg, idx, P, bytes: buf.byteLength };
+}
+
+function setReady(model, how) {
+  M = model;
+  $('status').textContent = `model.bin נטען (${how}) · ${M.chars.length} תווים · ${((M.bytes) / 1024).toFixed(0)}KB`;
+}
+
+// The published site keeps model + questions as bins/part-001.bin ... (only .bin files, each tiny):
+// download all parts, join them, and unpack [PKG1][len][model.bin][len][data.txt].
+async function loadPackage() {
+  try {
+    // where are the parts? next to this page, or one folder above it (../bins/ or ../)
+    const name = i => 'part-' + String(i).padStart(3, '0') + '.bin';
+    let base = null;
+    for (const b of ['bins/', '../bins/', '../']) {
+      try { if ((await fetch(b + name(1), { cache: 'no-store' })).ok) { base = b; break; } } catch {}
+    }
+    if (base === null) return null;
+    const parts = [];
+    for (let i = 1; i <= 500; i++) {
+      const r = await fetch(base + name(i), { cache: 'no-store' });
+      if (!r.ok) break;
+      parts.push(new Uint8Array(await r.arrayBuffer()));
+    }
+    if (!parts.length) return null;
+    const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0; for (const p of parts) { all.set(p, o); o += p.length; }
+    if (new TextDecoder().decode(all.subarray(0, 4)) !== 'PKG1') return null;
+    const dv = new DataView(all.buffer);
+    const ml = dv.getUint32(4, true);
+    const model = all.slice(8, 8 + ml).buffer;
+    const dl = dv.getUint32(8 + ml, true);
+    const data = new TextDecoder().decode(all.subarray(12 + ml, 12 + ml + dl));
+    return { model, data, parts: parts.length };
+  } catch { return null; }
+}
+const PKG = loadPackage();
+
+async function autoLoad() {
+  try {
+    const pkg = await PKG;
+    if (pkg) { setReady(parseModel(pkg.model), `${pkg.parts} קבצי bin`); return; }
+    const r = await fetch('model.bin', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    setReady(parseModel(await r.arrayBuffer()), 'אוטומטית מהתיקייה');
+  } catch (e) {
+    $('status').innerHTML = 'לא הצלחתי לקרוא את model.bin שלידי (דפדפן חוסם קבצים מקומיים). ' +
+      '<button id="manual">בחר את model.bin ידנית</button> או הרץ את start.bat';
+    $('manual').onclick = () => $('file').click();
+  }
+}
+$('plus').onclick = () => $('file').click();
+$('file').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try { setReady(parseModel(await f.arrayBuffer()), f.name); }
+  catch { $('status').textContent = 'הקובץ לא נראה כמו model.bin תקין.'; }
+};
+
+// ---- inference: same math as chat.py ----
+function nextChar(ctx, temp) {
+  const { C, E, H, chars, P } = M, V = chars.length;
+  const x = new Float32Array(C * E);
+  for (let i = 0; i < C; i++) {
+    const t = ctx[ctx.length - C + i];
+    for (let j = 0; j < E; j++) x[i * E + j] = P.emb[t * E + j];
+  }
+  const h = new Float32Array(H);
+  for (let k = 0; k < H; k++) h[k] = P.b1[k];
+  for (let i = 0; i < C * E; i++) {
+    const xi = x[i], row = i * H;
+    for (let k = 0; k < H; k++) h[k] += xi * P.W1[row + k];
+  }
+  for (let k = 0; k < H; k++) h[k] = Math.tanh(h[k]);
+  const lg = new Float64Array(V);
+  for (let v = 0; v < V; v++) lg[v] = P.b2[v];
+  for (let k = 0; k < H; k++) {
+    const hk = h[k], row = k * V;
+    for (let v = 0; v < V; v++) lg[v] += hk * P.W2[row + v];
+  }
+  let mx = -Infinity; for (let v = 0; v < V; v++) { lg[v] /= temp; if (lg[v] > mx) mx = lg[v]; }
+  let sum = 0; for (let v = 0; v < V; v++) { lg[v] = Math.exp(lg[v] - mx); sum += lg[v]; }
+  let r = Math.random() * sum;
+  for (let v = 0; v < V; v++) { r -= lg[v]; if (r <= 0) return v; }
+  return V - 1;
+}
+
+async function generate(question, onChar) {
+  // same prompt shape as training: a real earlier line, then the question
+  // lead-in is the previous answer in this conversation (in training every question followed some answer)
+  const prev = HIST.length ? HIST[HIST.length - 1].ai.split('\n')[0].slice(0, 60) : 'בכיף! תמיד כיף לעזור ולהמציא איתך.';
+  const prompt = 'ת: ' + prev + '\nש: ' + question + '\nת:';
+  const nl = M.idx['\n'];
+  const ctx = Array(M.C).fill(nl);
+  for (const c of prompt) if (c in M.idx) ctx.push(M.idx[c]);
+  let out = '';
+  for (let i = 0; i < 250; i++) {
+    const t = nextChar(ctx, 0.6);
+    ctx.push(t);
+    const ch = M.chars[t];
+    if (ch === '\n') break;
+    out += ch; onChar(out.trim());
+    await new Promise(r => setTimeout(r, 12));
+  }
+  return out.trim();
+}
+
+// ---- memory: earlier messages + the user's name, kept in this browser (localStorage) ----
+let HIST = [];             // [{me, ai}] in order
+let NAME = '';
+function saveMemory() {
+  try { localStorage.setItem('mc-mem', JSON.stringify({ HIST: HIST.slice(-40), NAME })); } catch {}
+}
+function loadMemory() {
+  try {
+    const d = JSON.parse(localStorage.getItem('mc-mem') || 'null');
+    if (!d) return;
+    HIST = d.HIST || []; NAME = d.NAME || '';
+    if (HIST.length) {
+      enterChat();
+      HIST.forEach(h => { addMsg('me', h.me); addMsg('ai', h.ai); remember(h.me); });
+    }
+  } catch {}
+}
+function memoryReply(text) {
+  let m = text.match(/(?:קוראים לי|שמי|השם שלי)\s+([֐-׿a-zA-Z]{2,})/);
+  if (m) { NAME = m[1]; return `נעים מאוד, ${NAME}! אזכור את השם שלך. מה ניצור היום?`; }
+  if (/מה שמי|איך קוראים לי|מי אני/.test(text))
+    return NAME ? `קוראים לך ${NAME}, כמובן!` : 'עוד לא סיפרת לי איך קוראים לך. כתוב "קוראים לי ..." ואזכור.';
+  if (/מה אמרתי|על מה דיברנו|מה כתבתי|מה שאלתי/.test(text)) {
+    const last = HIST.slice(-3).map(h => `"${h.me}"`);
+    return last.length ? 'לאחרונה כתבת: ' + last.join(', ') + '.' : 'עוד לא אמרת לי כלום, בוא נתחיל!';
+  }
+  return null;
+}
+
+// ---- know what the model learned: questions from data.txt, matched by bigram similarity ----
+let QS = [];
+const FALLBACKS = [
+  'לא בטוח שהבנתי, אבל נשמע מעניין! ספר לי עוד, או בקש ממני בדיחה, שיר או רעיון לסיפור.',
+  'אני מודל קטן ועוד לומד. נסה לשאול אחרת, או כתוב "חפש" ואחריו נושא ואמצא לך מידע באינטרנט.',
+  'הממ, את זה עוד לא למדתי. בוא ניצור משהו ביחד: רוצה שיר, סיפור או חידה?',
+  'שאלה יפה! אין לי תשובה טובה, אבל אשמח לספר לך סיפור קצר במקום. פשוט בקש.'
+];
+const norm = s => s.replace(/[^֐-׿a-z0-9 ]/gi, '').trim();
+const grams = s => { const g = new Set(); s = ' ' + norm(s) + ' '; for (let i = 0; i < s.length - 1; i++) g.add(s.slice(i, i + 2)); return g; };
+function dice(a, b) { let n = 0; for (const x of a) if (b.has(x)) n++; return a.size + b.size ? 2 * n / (a.size + b.size) : 0; }
+function closest(text) {
+  const g = grams(text); let best = null;
+  for (const q of QS) { const s = dice(g, q.g); if (!best || s > best.score) best = { q: q.t, score: s }; }
+  return best || { q: text, score: 1 };
+}
+async function loadQuestions() {
+  try {
+    const pkg = await PKG;
+    const t = pkg ? pkg.data : await (await fetch('data.txt', { cache: 'no-store' })).text();
+    QS = t.split(/\r?\n/).filter(l => l.startsWith('ש:')).map(l => l.slice(2).trim()).map(t => ({ t, g: grams(t) }));
+  } catch { QS = []; }
+}
+
+// ---- internet: Hebrew Wikipedia (CORS-enabled, no key needed) ----
+async function wiki(q) {
+  const u = 'https://he.wikipedia.org/w/api.php?action=query&generator=search&gsrlimit=1&prop=extracts&exintro=1&explaintext=1&exsentences=3&format=json&origin=*&gsrsearch=' + encodeURIComponent(q);
+  const r = await fetch(u);
+  const pages = (await r.json()).query?.pages;
+  const p = pages && Object.values(pages)[0];
+  return p ? `${p.title}\n${p.extract}\n(מקור: ויקיפדיה)` : 'לא מצאתי מידע על זה באינטרנט.';
+}
+
+// ---- UI ----
+function enterChat() {
+  if (started) return; started = true;
+  $('hero').style.display = 'none'; $('chat').style.display = 'block';
+}
+function addMsg(cls, text) {
+  const d = document.createElement('div'); d.className = 'msg ' + cls;
+  const b = document.createElement('div'); b.className = 'bubble'; b.textContent = text;
+  d.appendChild(b); $('chat').appendChild(d); $('chat').scrollTop = 1e9; return b;
+}
+function remember(text) {
+  const b = document.createElement('button'); b.className = 'item'; b.textContent = text;
+  b.onclick = () => { $('in').value = text; $('in').focus(); };
+  $('history').prepend(b);
+}
+
+async function send(text) {
+  text = (text ?? $('in').value).trim();
+  if (!text || busy) return;
+  if (!M) {
+    $('in').value = text;
+    $('status').innerHTML = 'model.bin לא נטען. בחר אותו עכשיו בחלון שנפתח, ואז שלח שוב. (עדיף להפעיל דרך start.bat)';
+    $('file').click();
+    return;
+  }
+  busy = true; $('in').value = '';
+  enterChat(); addMsg('me', text); remember(text);
+  const b = addMsg('ai', '…');
+  const m = text.match(/^חפש\s+(.+)/);
+  const mem = memoryReply(text);                    // name / "what did I say" from earlier messages
+  if (mem) {
+    b.textContent = mem;
+  } else if (web || m) {                            // internet mode or "חפש ..."
+    try { b.textContent = await wiki(m ? m[1] : text); }
+    catch { b.textContent = 'אין לי גישה לאינטרנט כרגע.'; }
+  } else {
+    const best = closest(text);
+    const need = norm(text).length < 4 ? 0.9 : 0.55;   // very short input must match almost exactly
+    if (QS.length && best.score < need) {            // not something the model learned
+      b.textContent = FALLBACKS[Math.floor(Math.random() * FALLBACKS.length)];
+    } else {
+      await generate(best ? best.q : text, out => { b.textContent = out; $('chat').scrollTop = 1e9; });
+    }
+  }
+  HIST.push({ me: text, ai: b.textContent }); saveMemory();
+  busy = false; $('in').focus();
+}
+
+function showInfo() {
+  if (!M) { $('status').textContent = 'model.bin עוד לא נטען.'; return; }
+  enterChat();
+  const params = M.chars.length * M.E + M.C * M.E * M.H + M.H + M.H * M.chars.length + M.chars.length;
+  addMsg('ai', `פרטי model.bin:\nגודל: ${(M.bytes / 1024).toFixed(1)}KB\nפרמטרים: ${params.toLocaleString()}\nאורך הקשר: ${M.C} תווים\nמימד embedding: ${M.E}\nשכבה חבויה: ${M.H}\nאוצר תווים (${M.chars.length}): ${M.chars.replace('\n', '')}`);
+}
+
+$('send').onclick = () => send();
+$('in').onkeydown = e => { if (e.key === 'Enter') send(); };
+$('info').onclick = showInfo;
+$('globe').onclick = () => {
+  web = !web;
+  $('globe').style.background = web ? 'var(--panel)' : '';
+  $('in').placeholder = web ? 'שאל משהו, אחפש באינטרנט…' : 'שאל אותי משהו…';
+  $('status').textContent = web ? 'חיפוש באינטרנט פעיל. אפשר גם להתחיל משפט ב"חפש".' : 'חיפוש באינטרנט כבוי.';
+};
+$('new').onclick = () => { HIST = []; saveMemory(); $('history').innerHTML = ''; $('chat').innerHTML = ''; $('chat').style.display = 'none'; $('hero').style.display = ''; started = false; $('in').focus(); };
+document.querySelectorAll('.chip').forEach(c => c.onclick = () => send(c.dataset.p));
+
+// the input bar sits under the title on the start screen, at the bottom once chatting
+$('hero-slot').appendChild($('bar'));
+new MutationObserver(() => {
+  (started ? $('dock') : $('hero-slot')).prepend($('bar'));
+}).observe($('chat'), { attributes: true });
+
+autoLoad();
+loadQuestions();
+loadMemory();
+</script>
+</body>
+</html>
