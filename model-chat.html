@@ -151,7 +151,9 @@ function nextChar(ctx, temp) {
 
 async function generate(question, onChar) {
   // same prompt shape as training: a real earlier line, then the question
-  const prompt = 'ת: בכיף! תמיד כיף לעזור ולהמציא איתך.\nש: ' + question + '\nת:';
+  // lead-in is the previous answer in this conversation (in training every question followed some answer)
+  const prev = HIST.length ? HIST[HIST.length - 1].ai.split('\n')[0].slice(0, 60) : 'בכיף! תמיד כיף לעזור ולהמציא איתך.';
+  const prompt = 'ת: ' + prev + '\nש: ' + question + '\nת:';
   const nl = M.idx['\n'];
   const ctx = Array(M.C).fill(nl);
   for (const c of prompt) if (c in M.idx) ctx.push(M.idx[c]);
@@ -165,6 +167,58 @@ async function generate(question, onChar) {
     await new Promise(r => setTimeout(r, 12));
   }
   return out.trim();
+}
+
+// ---- memory: earlier messages + the user's name, kept in this browser (localStorage) ----
+let HIST = [];             // [{me, ai}] in order
+let NAME = '';
+function saveMemory() {
+  try { localStorage.setItem('mc-mem', JSON.stringify({ HIST: HIST.slice(-40), NAME })); } catch {}
+}
+function loadMemory() {
+  try {
+    const d = JSON.parse(localStorage.getItem('mc-mem') || 'null');
+    if (!d) return;
+    HIST = d.HIST || []; NAME = d.NAME || '';
+    if (HIST.length) {
+      enterChat();
+      HIST.forEach(h => { addMsg('me', h.me); addMsg('ai', h.ai); remember(h.me); });
+    }
+  } catch {}
+}
+function memoryReply(text) {
+  let m = text.match(/(?:קוראים לי|שמי|השם שלי)\s+([֐-׿a-zA-Z]{2,})/);
+  if (m) { NAME = m[1]; return `נעים מאוד, ${NAME}! אזכור את השם שלך. מה ניצור היום?`; }
+  if (/מה שמי|איך קוראים לי|מי אני/.test(text))
+    return NAME ? `קוראים לך ${NAME}, כמובן!` : 'עוד לא סיפרת לי איך קוראים לך. כתוב "קוראים לי ..." ואזכור.';
+  if (/מה אמרתי|על מה דיברנו|מה כתבתי|מה שאלתי/.test(text)) {
+    const last = HIST.slice(-3).map(h => `"${h.me}"`);
+    return last.length ? 'לאחרונה כתבת: ' + last.join(', ') + '.' : 'עוד לא אמרת לי כלום, בוא נתחיל!';
+  }
+  return null;
+}
+
+// ---- know what the model learned: questions from data.txt, matched by bigram similarity ----
+let QS = [];
+const FALLBACKS = [
+  'לא בטוח שהבנתי, אבל נשמע מעניין! ספר לי עוד, או בקש ממני בדיחה, שיר או רעיון לסיפור.',
+  'אני מודל קטן ועוד לומד. נסה לשאול אחרת, או כתוב "חפש" ואחריו נושא ואמצא לך מידע באינטרנט.',
+  'הממ, את זה עוד לא למדתי. בוא ניצור משהו ביחד: רוצה שיר, סיפור או חידה?',
+  'שאלה יפה! אין לי תשובה טובה, אבל אשמח לספר לך סיפור קצר במקום. פשוט בקש.'
+];
+const norm = s => s.replace(/[^֐-׿a-z0-9 ]/gi, '').trim();
+const grams = s => { const g = new Set(); s = ' ' + norm(s) + ' '; for (let i = 0; i < s.length - 1; i++) g.add(s.slice(i, i + 2)); return g; };
+function dice(a, b) { let n = 0; for (const x of a) if (b.has(x)) n++; return a.size + b.size ? 2 * n / (a.size + b.size) : 0; }
+function closest(text) {
+  const g = grams(text); let best = null;
+  for (const q of QS) { const s = dice(g, q.g); if (!best || s > best.score) best = { q: q.t, score: s }; }
+  return best || { q: text, score: 1 };
+}
+async function loadQuestions() {
+  try {
+    const t = await (await fetch('data.txt', { cache: 'no-store' })).text();
+    QS = t.split(/\r?\n/).filter(l => l.startsWith('ש:')).map(l => l.slice(2).trim()).map(t => ({ t, g: grams(t) }));
+  } catch { QS = []; }
 }
 
 // ---- internet: Hebrew Wikipedia (CORS-enabled, no key needed) ----
@@ -205,12 +259,22 @@ async function send(text) {
   enterChat(); addMsg('me', text); remember(text);
   const b = addMsg('ai', '…');
   const m = text.match(/^חפש\s+(.+)/);
-  if (web || m) {                                   // internet mode or "חפש ..."
+  const mem = memoryReply(text);                    // name / "what did I say" from earlier messages
+  if (mem) {
+    b.textContent = mem;
+  } else if (web || m) {                            // internet mode or "חפש ..."
     try { b.textContent = await wiki(m ? m[1] : text); }
     catch { b.textContent = 'אין לי גישה לאינטרנט כרגע.'; }
   } else {
-    await generate(text, out => { b.textContent = out; $('chat').scrollTop = 1e9; });
+    const best = closest(text);
+    const need = norm(text).length < 4 ? 0.9 : 0.55;   // very short input must match almost exactly
+    if (QS.length && best.score < need) {            // not something the model learned
+      b.textContent = FALLBACKS[Math.floor(Math.random() * FALLBACKS.length)];
+    } else {
+      await generate(best ? best.q : text, out => { b.textContent = out; $('chat').scrollTop = 1e9; });
+    }
   }
+  HIST.push({ me: text, ai: b.textContent }); saveMemory();
   busy = false; $('in').focus();
 }
 
@@ -230,7 +294,7 @@ $('globe').onclick = () => {
   $('in').placeholder = web ? 'שאל משהו, אחפש באינטרנט…' : 'שאל אותי משהו…';
   $('status').textContent = web ? 'חיפוש באינטרנט פעיל. אפשר גם להתחיל משפט ב"חפש".' : 'חיפוש באינטרנט כבוי.';
 };
-$('new').onclick = () => { $('chat').innerHTML = ''; $('chat').style.display = 'none'; $('hero').style.display = ''; started = false; $('in').focus(); };
+$('new').onclick = () => { HIST = []; saveMemory(); $('history').innerHTML = ''; $('chat').innerHTML = ''; $('chat').style.display = 'none'; $('hero').style.display = ''; started = false; $('in').focus(); };
 document.querySelectorAll('.chip').forEach(c => c.onclick = () => send(c.dataset.p));
 
 // the input bar sits under the title on the start screen, at the bottom once chatting
@@ -240,6 +304,8 @@ new MutationObserver(() => {
 }).observe($('chat'), { attributes: true });
 
 autoLoad();
+loadQuestions();
+loadMemory();
 </script>
 </body>
 </html>
