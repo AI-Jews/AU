@@ -103,8 +103,34 @@ function setReady(model, how) {
   $('status').textContent = `model.bin נטען (${how}) · ${M.chars.length} תווים · ${((M.bytes) / 1024).toFixed(0)}KB`;
 }
 
+// The published site keeps model + questions as bins/part-001.bin ... (only .bin files, each tiny):
+// download all parts, join them, and unpack [PKG1][len][model.bin][len][data.txt].
+async function loadPackage() {
+  try {
+    const parts = [];
+    for (let i = 1; i <= 500; i++) {
+      const r = await fetch('bins/part-' + String(i).padStart(3, '0') + '.bin', { cache: 'no-store' });
+      if (!r.ok) break;
+      parts.push(new Uint8Array(await r.arrayBuffer()));
+    }
+    if (!parts.length) return null;
+    const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0; for (const p of parts) { all.set(p, o); o += p.length; }
+    if (new TextDecoder().decode(all.subarray(0, 4)) !== 'PKG1') return null;
+    const dv = new DataView(all.buffer);
+    const ml = dv.getUint32(4, true);
+    const model = all.slice(8, 8 + ml).buffer;
+    const dl = dv.getUint32(8 + ml, true);
+    const data = new TextDecoder().decode(all.subarray(12 + ml, 12 + ml + dl));
+    return { model, data, parts: parts.length };
+  } catch { return null; }
+}
+const PKG = loadPackage();
+
 async function autoLoad() {
   try {
+    const pkg = await PKG;
+    if (pkg) { setReady(parseModel(pkg.model), `${pkg.parts} קבצי bin`); return; }
     const r = await fetch('model.bin', { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status);
     setReady(parseModel(await r.arrayBuffer()), 'אוטומטית מהתיקייה');
@@ -216,7 +242,8 @@ function closest(text) {
 }
 async function loadQuestions() {
   try {
-    const t = await (await fetch('data.txt', { cache: 'no-store' })).text();
+    const pkg = await PKG;
+    const t = pkg ? pkg.data : await (await fetch('data.txt', { cache: 'no-store' })).text();
     QS = t.split(/\r?\n/).filter(l => l.startsWith('ש:')).map(l => l.slice(2).trim()).map(t => ({ t, g: grams(t) }));
   } catch { QS = []; }
 }
