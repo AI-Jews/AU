@@ -200,7 +200,10 @@ async function generate(question, onChar, useHistory = false) {
     prompt = past + 'ש: ' + question + '\nת:';
   } else {
     // same prompt shape as training: the previous answer as lead-in, then the question
-    const prev = HIST.length ? HIST[HIST.length - 1].ai.split('\n')[0].slice(0, 60) : 'בכיף! תמיד כיף לעזור ולהמציא איתך.';
+    // only use the last answer as lead-in if the model can read all of it (not after a web result)
+    const lh = HIST[HIST.length - 1];
+    const last = lh && lh.model ? lh.ai.split('\n')[0].slice(0, 60) : '';
+    const prev = last && [...last].every(c => c in M.idx) ? last : 'בכיף! תמיד כיף לעזור ולהמציא איתך.';
     prompt = 'ת: ' + prev + '\nש: ' + question + '\nת:';
   }
   const nl = M.idx['\n'];
@@ -266,16 +269,22 @@ const FALLBACKS = [
 const norm = s => s.replace(/[^֐-׿a-z0-9 ]/gi, '').trim();
 const grams = s => { const g = new Set(); s = ' ' + norm(s) + ' '; for (let i = 0; i < s.length - 1; i++) g.add(s.slice(i, i + 2)); return g; };
 function dice(a, b) { let n = 0; for (const x of a) if (b.has(x)) n++; return a.size + b.size ? 2 * n / (a.size + b.size) : 0; }
+// "מה זה X" and "מה זה Y" share most of their letters; compare only the topic part
+const LEADS = /^(מה זה|מי זה|מה|איך|למה|ספר לי על|כתוב שיר על|כתוב סיפור על|כתוב)\s+/;
+const core = s => { const c = norm(s).replace(LEADS, ''); return c.length >= 2 ? c : norm(s); };
 function closest(text) {
-  const g = grams(text); let best = null;
-  for (const q of QS) { const s = dice(g, q.g); if (!best || s > best.score) best = { q: q.t, score: s }; }
+  const g = grams(text), gc = grams(core(text)); let best = null;
+  for (const q of QS) {
+    const s = Math.min(dice(g, q.g), dice(gc, q.gc)) ;       // both the whole question and its topic must match
+    if (!best || s > best.score) best = { q: q.t, score: s };
+  }
   return best || { q: text, score: 1 };
 }
 async function loadQuestions() {
   try {
     const pkg = await PKG;
     const t = pkg ? pkg.data : await (await fetch('data.txt', { cache: 'no-store' })).text();
-    QS = t.split(/\r?\n/).filter(l => l.startsWith('ש:')).map(l => l.slice(2).trim()).map(t => ({ t, g: grams(t) }));
+    QS = t.split(/\r?\n/).filter(l => l.startsWith('ש:')).map(l => l.slice(2).trim()).map(t => ({ t, g: grams(t), gc: grams(core(t)) }));
   } catch { QS = []; }
 }
 
@@ -316,6 +325,7 @@ async function send(text) {
   busy = true; $('in').value = '';
   enterChat(); addMsg('me', text); remember(text);
   const b = addMsg('ai', '…');
+  let fromModel = false;                            // true only when the model wrote the answer
   const m = text.match(/^חפש\s+(.+)/);
   const mem = memoryReply(text);                    // earlier messages: name, "what did I say" (rule-based)
   if (mem) {
@@ -326,13 +336,20 @@ async function send(text) {
   } else {
     const best = closest(text);
     const need = norm(text).length < 4 ? 0.9 : 0.55;   // very short input must match almost exactly
-    if (QS.length && best.score < need) {            // not something the model learned
-      b.textContent = FALLBACKS[Math.floor(Math.random() * FALLBACKS.length)];
+    if (QS.length && best.score < need) {            // not something the model learned: search the web
+      const fallback = FALLBACKS[Math.floor(Math.random() * FALLBACKS.length)];
+      const topic = text.replace(/^(מה זה|מי זה|מי היה|מי הייתה|מהו|מהי|מה זאת|ספר לי על|תסביר לי על|תסביר לי)\s+/, '').replace(/[?!.\s]+$/, '').trim();
+      if (topic.length >= 3) {
+        b.textContent = 'מחפש באינטרנט…';
+        try { const r = await wiki(topic); b.textContent = r.startsWith('לא מצאתי') ? fallback : r; }
+        catch { b.textContent = fallback; }
+      } else b.textContent = fallback;
     } else {
       await generate(best ? best.q : text, out => { b.textContent = out; $('chat').scrollTop = 1e9; });
+      fromModel = true;
     }
   }
-  HIST.push({ me: text, ai: b.textContent }); saveMemory();
+  HIST.push({ me: text, ai: b.textContent, model: fromModel }); saveMemory();
   busy = false; $('in').focus();
 }
 
