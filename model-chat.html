@@ -220,27 +220,34 @@ async function generate(question, onChar, useHistory = false) {
 
 // ---- memory: earlier messages + the user's name, kept in this browser (localStorage) ----
 let HIST = [];             // [{me, ai}] in order
-let NAME = '';
+let NAME = '', LIKE = '', CITY = '';
 function saveMemory() {
-  try { localStorage.setItem('mc-mem', JSON.stringify({ HIST: HIST.slice(-40), NAME })); } catch {}
+  try { localStorage.setItem('mc-mem', JSON.stringify({ HIST: HIST.slice(-40), NAME, LIKE, CITY })); } catch {}
 }
 function loadMemory() {
   try {
     const d = JSON.parse(localStorage.getItem('mc-mem') || 'null');
     if (!d) return;
-    HIST = d.HIST || []; NAME = d.NAME || '';
+    HIST = d.HIST || []; NAME = d.NAME || ''; LIKE = d.LIKE || ''; CITY = d.CITY || '';
     if (HIST.length) {
       enterChat();
       HIST.forEach(h => { addMsg('me', h.me); addMsg('ai', h.ai); remember(h.me); });
     }
   } catch {}
 }
-const MEM_RE = /^(קוראים לי|אני אוהב|אני גר|מה שמי|איך קוראים לי|מה אני אוהב|איפה אני גר|אתה זוכר)/;
 function memoryReply(text) {
   let m = text.match(/(?:קוראים לי|שמי|השם שלי)\s+([֐-׿a-zA-Z]{2,})/);
   if (m) { NAME = m[1]; return `נעים מאוד, ${NAME}! אזכור את השם שלך. מה ניצור היום?`; }
   if (/מה שמי|איך קוראים לי|מי אני/.test(text))
     return NAME ? `קוראים לך ${NAME}, כמובן!` : 'עוד לא סיפרת לי איך קוראים לך. כתוב "קוראים לי ..." ואזכור.';
+  m = text.match(/^אני אוהב(?:ת)?\s+(?!אותך$)(.{2,40})$/);
+  if (m) { LIKE = m[1].trim(); return `איזה יופי! ${LIKE} זה נהדר. אזכור.`; }
+  if (/^(אתה זוכר )?מה אני אוהב/.test(text))
+    return LIKE ? `אמרת שאתה אוהב ${LIKE}.` : 'עוד לא סיפרת לי מה אתה אוהב. כתוב "אני אוהב ..." ואזכור.';
+  m = text.match(/^אני גר(?:ה)? ב-?(.{2,30})$/);
+  if (m) { CITY = m[1].trim(); return `איזה מקום יפה! אזכור שאתה גר ב${CITY}.`; }
+  if (/^(אתה זוכר )?איפה אני גר/.test(text))
+    return CITY ? `אמרת שאתה גר ב${CITY}.` : 'עוד לא סיפרת לי איפה אתה גר. כתוב "אני גר ב..." ואזכור.';
   if (/מה אמרתי|על מה דיברנו|מה כתבתי|מה שאלתי/.test(text)) {
     const last = HIST.slice(-3).map(h => `"${h.me}"`);
     return last.length ? 'לאחרונה כתבת: ' + last.join(', ') + '.' : 'עוד לא אמרת לי כלום, בוא נתחיל!';
@@ -310,11 +317,8 @@ async function send(text) {
   enterChat(); addMsg('me', text); remember(text);
   const b = addMsg('ai', '…');
   const m = text.match(/^חפש\s+(.+)/);
-  const isMem = MEM_RE.test(text);                  // facts told earlier: the model answers from its context
-  const mem = isMem ? null : memoryReply(text);     // otherwise rule-based: "what did I say"
-  if (isMem) {
-    await generate(text, out => { b.textContent = out; $('chat').scrollTop = 1e9; }, true);
-  } else if (mem) {
+  const mem = memoryReply(text);                    // earlier messages: name, "what did I say" (rule-based)
+  if (mem) {
     b.textContent = mem;
   } else if (web || m) {                            // internet mode or "חפש ..."
     try { b.textContent = await wiki(m ? m[1] : text); }
