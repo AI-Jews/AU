@@ -56,10 +56,10 @@
     <h1>ממה להתחיל?</h1>
     <div id="hero-slot"></div>
     <div class="chips" id="chips">
-      <button class="chip" data-p="היה היה">היה היה…</button>
-      <button class="chip" data-p="בוא">בוא ניצור…</button>
-      <button class="chip" data-p="שיר">שיר קטן</button>
-      <button class="chip" data-p="אני אוהב">אני אוהב…</button>
+      <button class="chip" data-p="ספר לי בדיחה">ספר לי בדיחה</button>
+      <button class="chip" data-p="תן לי רעיון לסיפור">רעיון לסיפור</button>
+      <button class="chip" data-p="כתוב שיר על הים">שיר על הים</button>
+      <button class="chip" data-p="חפש ירושלים">חפש ירושלים</button>
     </div>
   </div>
   <div id="chat"></div>
@@ -67,7 +67,8 @@
   <div id="dock">
     <div class="bar" id="bar">
       <button id="plus" title="טען model.bin ידנית">＋</button>
-      <input id="in" type="text" placeholder="כתוב התחלה של משפט והמודל ימשיך…" autocomplete="off">
+      <button id="globe" title="חיפוש באינטרנט (ויקיפדיה)">🌐</button>
+      <input id="in" type="text" placeholder="שאל אותי משהו…" autocomplete="off">
       <button class="send" id="send" title="שלח">➤</button>
     </div>
     <div id="status">טוען את model.bin…</div>
@@ -80,6 +81,7 @@ const $ = id => document.getElementById(id);
 let M = null;              // loaded model: {C,E,H,chars,idx,P}
 let busy = false;
 let started = false;
+let web = false;           // internet search mode
 
 // ---- model.bin loading (format written by train.py) ----
 function parseModel(buf) {
@@ -147,20 +149,31 @@ function nextChar(ctx, temp) {
   return V - 1;
 }
 
-async function generate(prompt, onChar) {
+async function generate(question, onChar) {
+  // same prompt shape as training: a real earlier line, then the question
+  const prompt = 'ת: בכיף! תמיד כיף לעזור ולהמציא איתך.\nש: ' + question + '\nת:';
   const nl = M.idx['\n'];
   const ctx = Array(M.C).fill(nl);
   for (const c of prompt) if (c in M.idx) ctx.push(M.idx[c]);
   let out = '';
-  for (let i = 0; i < 220; i++) {
-    const t = nextChar(ctx, 0.8);
+  for (let i = 0; i < 250; i++) {
+    const t = nextChar(ctx, 0.6);
     ctx.push(t);
     const ch = M.chars[t];
-    if (ch === '\n' && (prompt.length + out.length) > 40) break;
-    out += ch; onChar(out);
+    if (ch === '\n') break;
+    out += ch; onChar(out.trim());
     await new Promise(r => setTimeout(r, 12));
   }
-  return out;
+  return out.trim();
+}
+
+// ---- internet: Hebrew Wikipedia (CORS-enabled, no key needed) ----
+async function wiki(q) {
+  const u = 'https://he.wikipedia.org/w/api.php?action=query&generator=search&gsrlimit=1&prop=extracts&exintro=1&explaintext=1&exsentences=3&format=json&origin=*&gsrsearch=' + encodeURIComponent(q);
+  const r = await fetch(u);
+  const pages = (await r.json()).query?.pages;
+  const p = pages && Object.values(pages)[0];
+  return p ? `${p.title}\n${p.extract}\n(מקור: ויקיפדיה)` : 'לא מצאתי מידע על זה באינטרנט.';
 }
 
 // ---- UI ----
@@ -191,7 +204,13 @@ async function send(text) {
   busy = true; $('in').value = '';
   enterChat(); addMsg('me', text); remember(text);
   const b = addMsg('ai', '…');
-  await generate(text, out => { b.textContent = text + out; $('chat').scrollTop = 1e9; });
+  const m = text.match(/^חפש\s+(.+)/);
+  if (web || m) {                                   // internet mode or "חפש ..."
+    try { b.textContent = await wiki(m ? m[1] : text); }
+    catch { b.textContent = 'אין לי גישה לאינטרנט כרגע.'; }
+  } else {
+    await generate(text, out => { b.textContent = out; $('chat').scrollTop = 1e9; });
+  }
   busy = false; $('in').focus();
 }
 
@@ -205,6 +224,12 @@ function showInfo() {
 $('send').onclick = () => send();
 $('in').onkeydown = e => { if (e.key === 'Enter') send(); };
 $('info').onclick = showInfo;
+$('globe').onclick = () => {
+  web = !web;
+  $('globe').style.background = web ? 'var(--panel)' : '';
+  $('in').placeholder = web ? 'שאל משהו, אחפש באינטרנט…' : 'שאל אותי משהו…';
+  $('status').textContent = web ? 'חיפוש באינטרנט פעיל. אפשר גם להתחיל משפט ב"חפש".' : 'חיפוש באינטרנט כבוי.';
+};
 $('new').onclick = () => { $('chat').innerHTML = ''; $('chat').style.display = 'none'; $('hero').style.display = ''; started = false; $('in').focus(); };
 document.querySelectorAll('.chip').forEach(c => c.onclick = () => send(c.dataset.p));
 
